@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+  BETTER_AUTH_URL: ${{ secrets.BETTER_AUTH_URL }}
+  R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+  R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+
+  test-e2e:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install --frozen-lockfile
+
+      - name: Create Neon test branch
+        if: env.DATABASE_URL != ''
+        id: neon
+        run: |
+          # In future, use Neon MCP to create ephemeral branch
+          # For now, use main DATABASE_URL
+          echo "branch_url=${DATABASE_URL}" >> $GITHUB_OUTPUT
+
+      - name: Run migrations on test branch
+        if: env.DATABASE_URL != ''
+        run: |
+          export DATABASE_URL="${{ steps.neon.outputs.branch_url }}"
+          bunx drizzle-kit push
+
+      - name: Start dev server
+        run: |
+          export DATABASE_URL="${{ steps.neon.outputs.branch_url }}"
+          bun run dev &
+          sleep 10
+
+      - name: Install Playwright
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: |
+          export TEST_BASE_URL="http://localhost:3000"
+          export DATABASE_URL="${{ steps.neon.outputs.branch_url }}"
+          bunx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Cleanup Neon test branch
+        if: always() && env.DATABASE_URL != ''
+        run: |
+          # In future, use Neon MCP to delete ephemeral branch
+          echo "Branch cleanup would happen here"
