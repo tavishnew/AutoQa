@@ -4,6 +4,9 @@ import { auth } from "./auth";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { TRUSTED_ORIGINS } from "@/lib/trusted-origins";
+
+const TRUSTED_ORIGIN_SET = new Set<string>(TRUSTED_ORIGINS);
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -20,8 +23,6 @@ async function getServerEntry(): Promise<ServerEntry> {
   return serverEntryPromise;
 }
 
-// h3 swallows in-handler throws into a normal 500 Response with body
-// {"unhandled":true,"message":"HTTPError"} — try/catch alone never fires for those.
 async function normalizeCatastrophicSsrResponse(response: Response): Promise<Response> {
   if (response.status < 500) return response;
   const contentType = response.headers.get("content-type") ?? "";
@@ -46,6 +47,33 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
+function corsHeaders(origin: string) {
+  const headers = new Headers();
+  headers.set("Access-Control-Allow-Origin", origin);
+  headers.set("Access-Control-Allow-Credentials", "true");
+  headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type");
+  return headers;
+}
+
+function isTrustedOrigin(origin: string | null): boolean {
+  return origin !== null && TRUSTED_ORIGIN_SET.has(origin);
+}
+
+async function handleCORS(request: Request): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/api/auth/")) return null;
+
+  const origin = request.headers.get("origin");
+  if (!isTrustedOrigin(origin)) return null;
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders(origin!) });
+  }
+
+  return null;
+}
+
 async function handleAuth(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/api/auth/")) {
@@ -56,9 +84,23 @@ async function handleAuth(request: Request): Promise<Response | null> {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
-    // Handle Better Auth endpoints first
+    const corsResponse = await handleCORS(request);
+    if (corsResponse) return corsResponse;
+
     const authResponse = await handleAuth(request);
-    if (authResponse) return authResponse;
+    if (authResponse) {
+      const origin = request.headers.get("origin");
+      if (isTrustedOrigin(origin)) {
+        const headers = new Headers(authResponse.headers);
+        corsHeaders(origin!).forEach((value, key) => headers.set(key, value));
+        return new Response(authResponse.body, {
+          status: authResponse.status,
+          statusText: authResponse.statusText,
+          headers,
+        });
+      }
+      return authResponse;
+    }
 
     try {
       const handler = await getServerEntry();

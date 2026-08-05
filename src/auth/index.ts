@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
+import { TRUSTED_ORIGINS } from "@/lib/trusted-origins";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -30,6 +31,7 @@ export const auth = betterAuth({
       generateId: false,
     },
   },
+  trustedOrigins: [...TRUSTED_ORIGINS],
 });
 
 export type Session = typeof auth.$Infer.Session.session & {
