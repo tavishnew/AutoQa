@@ -77,6 +77,31 @@ export const verifications = pgTable("verifications", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const userSettings = pgTable(
+  "user_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .references(() => users.id, { onDelete: "cascade" })
+      .notNull()
+      .unique(),
+    ollamaBaseUrl: text("ollama_base_url").default("http://localhost:11434"),
+    nvidiaApiKeyEncrypted: text("nvidia_api_key_encrypted"),
+    openRouterApiKeyEncrypted: text("openrouter_api_key_encrypted"),
+    preferredProvider: text("preferred_provider").default("ollama"),
+    notificationPrefs: jsonb("notification_prefs").default({
+      emailRunComplete: true,
+      emailRunFailed: true,
+      weeklyDigest: true,
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    userIdIdx: index("user_settings_user_id_idx").on(table.userId),
+  }),
+);
+
 export const projects = pgTable(
   "projects",
   {
@@ -167,6 +192,10 @@ export const testResultsRelations = relations(testResults, ({ one }) => ({
   run: one(runs, { fields: [testResults.runId], references: [runs.id] }),
 }));
 
+export const userSettingsRelations = relations(userSettings, ({ one }) => ({
+  user: one(users, { fields: [userSettings.userId], references: [users.id] }),
+}));
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
@@ -179,3 +208,5 @@ export type Run = typeof runs.$inferSelect;
 export type NewRun = typeof runs.$inferInsert;
 export type TestResult = typeof testResults.$inferSelect;
 export type NewTestResult = typeof testResults.$inferInsert;
+export type UserSettings = typeof userSettings.$inferSelect;
+export type NewUserSettings = typeof userSettings.$inferInsert;
