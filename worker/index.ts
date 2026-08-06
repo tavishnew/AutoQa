@@ -4,32 +4,56 @@ import { chromium, Page } from "playwright";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import DOMPurify from "isomorphic-dompurify";
 import { JSDOM } from "jsdom";
+import { callLLM, aiAvailable } from "./llm/client";
+import { buildDiscoverPrompt } from "./llm/prompts/discover";
+import { buildJudgePrompt } from "./llm/prompts/judge";
+import { buildSummarizePrompt } from "./llm/prompts/summarize";
 
 const window = new JSDOM("").window;
 const purify = DOMPurify(window);
 
-const r2Client = new S3Client({
-  region: "auto",
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
-  },
-});
-
-const R2_BUCKET = process.env.R2_BUCKET_NAME!;
-const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL!;
-
-interface TestResult {
-  name: string;
-  status: "passed" | "failed" | "skipped" | "flaky";
-  duration: number;
-  evidenceUrl?: string;
-  errorMessage?: string;
-  metadata?: Record<string, unknown>;
+interface AIMetadata {
+  provider: string;
+  model: string;
+  latencyMs: number;
 }
 
-async function discoverUrls(page: Page, baseUrl: string): Promise<string[]> {
+interface DiscoveredUrl {
+  url: string;
+  ai?: AIMetadata;
+}
+
+async function discoverPage(page: Page, baseUrl: string): Promise<DiscoveredUrl[]> {
+  if (aiAvailable) {
+    try {
+      const domText = await page.evaluate(() => document.body.innerText);
+      const prompt = buildDiscoverPrompt(domText, baseUrl);
+      const start = Date.now();
+      const result = await callLLM(prompt, { temperature: 0.1, maxTokens: 1000 });
+      const latencyMs = Date.now() - start;
+
+      const elements = JSON.parse(result.text) as Array<{ selector: string; label: string; type: string; priority: number }>;
+      const urls = new Set<string>();
+
+      for (const el of elements.sort((a, b) => a.priority - b.priority).slice(0, 5)) {
+        try {
+          const href = await page.$eval(el.selector, (el) => (el as HTMLAnchorElement).href);
+          if (href && href.startsWith(baseUrl)) urls.add(href);
+        } catch {
+          // selector may not be a link or may not exist
+        }
+      }
+
+      if (urls.size > 0) {
+        const aiMeta: AIMetadata = { provider: result.provider, model: result.model, latencyMs };
+        return Array.from(urls).map((u) => ({ url: u, ai: aiMeta }));
+      }
+    } catch (e) {
+      console.warn("LLM discover failed, falling back to crawl:", (e as Error).message);
+    }
+  }
+
+  // Fallback: crawl all depth-2 links
   const urls = new Set<string>();
   const visited = new Set<string>();
 
@@ -58,27 +82,92 @@ async function discoverUrls(page: Page, baseUrl: string): Promise<string[]> {
   }
 
   await crawl(baseUrl);
-  return Array.from(urls);
+  return Array.from(urls).map((u) => ({ url: u }));
 }
 
-async function runTests(page: Page, urls: string[]): Promise<TestResult[]> {
+async function judgeResult(pageText: string, title: string, errors: string[]): Promise<{ passed: boolean; reason: string; ai?: AIMetadata }> {
+  if (aiAvailable) {
+    try {
+      const prompt = buildJudgePrompt(pageText, title, errors);
+      const start = Date.now();
+      const result = await callLLM(prompt, { temperature: 0.1, maxTokens: 200 });
+      const latencyMs = Date.now() - start;
+
+      const parsed = JSON.parse(result.text) as { passed: boolean; reason: string };
+      return { ...parsed, ai: { provider: result.provider, model: result.model, latencyMs } };
+    } catch (e) {
+      console.warn("LLM judge failed, falling back to heuristic:", (e as Error).message);
+    }
+  }
+
+  const passed = pageText.length > 100 && !errors.some((e) => /error|fail|denied|not found/i.test(e));
+  return { passed, reason: passed ? "Page has sufficient content" : "Page appears empty or errored" };
+}
+
+async function summarizeFailure(testName: string, status: "failed" | "flaky", errorMessage: string): Promise<{ summary: string; ai?: AIMetadata }> {
+  if (aiAvailable) {
+    try {
+      const prompt = buildSummarizePrompt(testName, status, errorMessage);
+      const start = Date.now();
+      const result = await callLLM(prompt, { temperature: 0.3, maxTokens: 300 });
+      const latencyMs = Date.now() - start;
+
+      return { summary: result.text.trim(), ai: { provider: result.provider, model: result.model, latencyMs } };
+    } catch (e) {
+      console.warn("LLM summarize failed, falling back to template:", (e as Error).message);
+    }
+  }
+
+  const summary = `${testName} ${status}: ${errorMessage}. The test encountered an unexpected condition. Review the error details and page state at the time of failure. Check network logs and console output for root cause.`;
+  return { summary };
+}
+
+const r2Client = new S3Client({
+  region: "auto",
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  },
+});
+
+const R2_BUCKET = process.env.R2_BUCKET_NAME!;
+const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL!;
+
+interface TestResult {
+  name: string;
+  status: "passed" | "failed" | "skipped" | "flaky";
+  duration: number;
+  evidenceUrl?: string;
+  errorMessage?: string;
+  metadata?: Record<string, unknown>;
+}
+
+async function runTests(page: Page, urls: DiscoveredUrl[]): Promise<TestResult[]> {
   const results: TestResult[] = [];
 
-  for (const url of urls) {
+  for (const discovered of urls) {
+    const url = discovered.url;
     const startTime = Date.now();
     try {
       await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
       await page.waitForLoadState("domcontentloaded");
 
       const title = await page.title();
-      const hasContent = await page.evaluate(() => document.body.innerText.length > 100);
+      const pageText = await page.evaluate(() => document.body.innerText);
+      const errors: string[] = [];
+
+      const judge = await judgeResult(pageText, title, errors);
+      const metadata: Record<string, unknown> = { url, title };
+      if (judge.ai) metadata.ai = judge.ai;
+      if (discovered.ai) metadata.discoverAi = discovered.ai;
 
       results.push({
         name: `Page load: ${url}`,
-        status: hasContent ? "passed" : "failed",
+        status: judge.passed ? "passed" : "failed",
         duration: Date.now() - startTime,
-        metadata: { url, title },
-        errorMessage: hasContent ? undefined : "Page has minimal content",
+        metadata,
+        errorMessage: judge.passed ? undefined : judge.reason,
       });
 
       const links = await page.$$eval("a[href]", (els: HTMLAnchorElement[]) =>
@@ -89,30 +178,46 @@ async function runTests(page: Page, urls: string[]): Promise<TestResult[]> {
         const linkStart = Date.now();
         try {
           const response = await page.request.get(link);
+          const linkPassed = response.ok();
+          const linkError = linkPassed ? undefined : `HTTP ${response.status()}`;
+
+          const linkMetadata: Record<string, unknown> = { url: link, status: response.status() };
+          if (linkError) {
+            const summarized = await summarizeFailure(`Link check: ${link}`, "failed", linkError);
+            linkMetadata.ai = summarized.ai;
+            linkMetadata.summary = summarized.summary;
+          }
+
           results.push({
             name: `Link check: ${link}`,
-            status: response.ok() ? "passed" : "failed",
+            status: linkPassed ? "passed" : "failed",
             duration: Date.now() - linkStart,
-            metadata: { url: link, status: response.status() },
-            errorMessage: response.ok() ? undefined : `HTTP ${response.status()}`,
+            metadata: linkMetadata,
+            errorMessage: linkError,
           });
         } catch (e) {
+          const linkError = String(e);
+          const summarized = await summarizeFailure(`Link check: ${link}`, "failed", linkError);
+
           results.push({
             name: `Link check: ${link}`,
             status: "failed",
             duration: Date.now() - linkStart,
-            metadata: { url: link },
-            errorMessage: String(e),
+            metadata: { url: link, ai: summarized.ai, summary: summarized.summary },
+            errorMessage: linkError,
           });
         }
       }
     } catch (e) {
+      const errorStr = String(e);
+      const summarized = await summarizeFailure(`Page load: ${url}`, "failed", errorStr);
+
       results.push({
         name: `Page load: ${url}`,
         status: "failed",
         duration: Date.now() - startTime,
-        metadata: { url },
-        errorMessage: String(e),
+        metadata: { url, ai: summarized.ai, summary: summarized.summary },
+        errorMessage: errorStr,
       });
     }
   }
@@ -305,11 +410,11 @@ async function processRun(runId: string) {
 
   try {
     console.log(`Discovering URLs for ${runData.targetUrl}...`);
-    const urls = await discoverUrls(page, runData.targetUrl);
-    console.log(`Found ${urls.length} URLs to test`);
+    const discoveredUrls = await discoverPage(page, runData.targetUrl);
+    console.log(`Found ${discoveredUrls.length} URLs to test`);
 
     console.log(`Running tests...`);
-    const testResultsData = await runTests(page, urls);
+    const testResultsData = await runTests(page, discoveredUrls);
 
     const finishedAt = new Date();
     await db.insert(testResults).values(
