@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   Activity,
   AlertTriangle,
-  Bell,
   CheckCircle2,
   ChevronRight,
   Clock,
@@ -28,13 +27,14 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { authClient } from "@/auth/client";
-import { getDashboardStats } from "@/lib/server-functions";
+import { getDashboardStats, getRuns } from "@/lib/server-functions";
 import { useQuery } from "@tanstack/react-query";
+import { useState, useMemo } from "react";
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
     meta: [
-      { title: "Dashboard — AutoQA test runs & coverage" },
+      { title: "Dashboard — AutoQA" },
       {
         name: "description",
         content:
@@ -74,9 +74,13 @@ const statsConfig = [
     key: "passedRunCount",
     runCount: "runCount",
   },
-  { label: "Tests run (7d)", suffix: "", icon: Activity, key: "runCount" },
-  { label: "Median runtime", suffix: "s", icon: Clock, key: "medianRuntime", static: "18" },
-  { label: "Flaky specs", suffix: "", icon: AlertTriangle, key: "flakyCount", static: "3" },
+  { label: "Tests run", suffix: "", icon: Activity, key: "runCount" },
+  {
+    label: "Failed",
+    suffix: "",
+    icon: AlertTriangle,
+    key: "failedRunCount",
+  },
 ];
 
 const statusStyles: Record<string, string> = {
@@ -91,11 +95,48 @@ const statusStyles: Record<string, string> = {
 function DashboardPage() {
   const location = useLocation();
   const currentPath = location.pathname;
+  const { data: session } = authClient.useSession();
+  const [search, setSearch] = useState("");
 
   const { data: stats } = useQuery({
     queryKey: ["dashboardStats"],
     queryFn: getDashboardStats,
   });
+
+  const recentRunsQuery = useQuery({
+    queryKey: ["recentRuns"],
+    queryFn: async () => {
+      const all = await getRuns({});
+      return all.slice(0, 10);
+    },
+  });
+
+  const recentRuns = useMemo(() => {
+    const runs = recentRunsQuery.data ?? [];
+    if (!search.trim()) return runs;
+    const q = search.toLowerCase();
+    return runs.filter(
+      (r) =>
+        r.projectName?.toLowerCase().includes(q) ||
+        r.targetUrl.toLowerCase().includes(q) ||
+        r.id.toLowerCase().includes(q),
+    );
+  }, [recentRunsQuery.data, search]);
+
+  const displayName = session?.user?.name || "User";
+  const initials = displayName
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const email = session?.user?.email || "";
+
+  const runCount = stats?.runCount ?? 0;
+  const progressPct = Math.min((runCount / 100) * 100, 100);
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -115,9 +156,7 @@ function DashboardPage() {
               <Link
                 key={item.label}
                 to={item.href}
-                className={`relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                  isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground"
-                }`}
+                className={`relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${isActive ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}
               >
                 {isActive ? (
                   <motion.span
@@ -136,11 +175,15 @@ function DashboardPage() {
         </nav>
 
         <div className="rounded-lg border border-border bg-background p-4">
-          <p className="font-mono text-xs font-bold text-foreground">Free plan</p>
-          <p className="mt-1 text-xs text-muted-foreground">312 / 500 runs used</p>
-          <Progress value={62} className="mt-3 h-1.5" />
+          <p className="font-mono text-xs font-bold text-foreground">Workspace</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {stats ? `${runCount} runs this period` : "No runs yet"}
+          </p>
+          <Progress value={progressPct} className="mt-3 h-1.5" />
           <Button asChild size="sm" className="mt-4 w-full font-mono text-[11px] font-bold">
-            <Link to="/pricing">Upgrade</Link>
+            <Link to="/dashboard/runs" search={{ new: "true" }}>
+              <Play className="h-4 w-4" /> Run tests
+            </Link>
           </Button>
         </div>
       </aside>
@@ -173,13 +216,14 @@ function DashboardPage() {
                     <Link
                       key={item.label}
                       to={item.href}
-                      className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                        isActive
-                          ? "text-foreground bg-muted"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
+                      className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${isActive
+                        ? "text-foreground bg-muted"
+                        : "text-muted-foreground hover:text-foreground"
+                        }`}
                     >
-                      <item.icon className={`h-4 w-4 ${isActive ? "text-foreground" : ""}`} />
+                      <item.icon
+                        className={`h-4 w-4 ${isActive ? "text-foreground" : ""}`}
+                      />
                       <span>{item.label}</span>
                     </Link>
                   );
@@ -189,19 +233,24 @@ function DashboardPage() {
           </Sheet>
           <div className="relative hidden max-w-xs flex-1 sm:block">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input placeholder="Search suites, runs, specs…" className="pl-9" />
+            <Input
+              placeholder="Search runs…"
+              className="pl-9"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <Button variant="ghost" size="icon" aria-label="Notifications">
-              <Bell className="h-4 w-4" />
-            </Button>
             <Button asChild size="sm" className="font-mono text-xs font-bold">
               <Link to="/dashboard/runs" search={{ new: "true" }}>
-                <Play className="h-4 w-4" /> Run suite
+                <Play className="h-4 w-4" /> Run tests
               </Link>
             </Button>
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary font-mono text-xs font-bold text-primary-foreground">
-              AL
+            <span
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-primary font-mono text-xs font-bold text-primary-foreground"
+              title={displayName}
+            >
+              {initials}
             </span>
           </div>
         </header>
@@ -211,17 +260,17 @@ function DashboardPage() {
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <h1 className="font-mono text-2xl font-bold tracking-tight text-foreground">
-                  Good afternoon
+                  {greeting}, {displayName.split(" ")[0]}
                 </h1>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {stats
                     ? `${stats.projectCount} projects · ${stats.runCount} runs`
-                    : "5 projects · last run 3 minutes ago · 1 failure needs review"}
+                    : "Welcome to AutoQA"}
                 </p>
               </div>
               <Badge variant="outline" className="font-mono text-[11px]">
                 <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-foreground" />
-                Agents idle
+                {stats && stats.runCount > 0 ? `${stats.runCount} runs` : "Ready"}
               </Badge>
             </div>
           </Reveal>
@@ -241,17 +290,15 @@ function DashboardPage() {
                     {stat.key && stats
                       ? stat.key === "passedRunCount" && stats.runCount > 0
                         ? Math.round((stats.passedRunCount / stats.runCount) * 100)
-                        : stats[stat.key as keyof typeof stats] || stat.static || "—"
-                      : stat.static || "—"}
+                        : stats[stat.key as keyof typeof stats]
+                      : "—"}
                     {stat.suffix}
                   </p>
                   <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
                     <TrendingUp className="h-3 w-3" />
                     {stat.key === "passedRunCount" && stats
-                      ? `${stats.passedRunCount}/${stats.runCount} runs passed`
-                      : stat.static
-                        ? `${stat.static} vs last week`
-                        : "vs last week"}
+                      ? `${stats.passedRunCount}/${stats.runCount} passed`
+                      : "All time"}
                   </p>
                 </GlowCard>
               </StaggerItem>
@@ -263,81 +310,119 @@ function DashboardPage() {
             <Reveal className="rounded-xl border border-border bg-card">
               <div className="flex items-center justify-between border-b border-border px-5 py-4">
                 <h2 className="font-mono text-sm font-bold text-foreground">Recent runs</h2>
-                <Link
-                  to="/dashboard/runs"
-                  className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  View all <ChevronRight className="h-3 w-3" />
-                </Link>
+                {search ? (
+                  <span className="text-xs text-muted-foreground">
+                    {recentRuns.length} match{recentRuns.length !== 1 ? "es" : ""}
+                  </span>
+                ) : (
+                  <Link
+                    to="/dashboard/runs"
+                    className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    View all <ChevronRight className="h-3 w-3" />
+                  </Link>
+                )}
               </div>
               <ul className="divide-y divide-border">
-                <li className="flex items-center justify-center py-12 text-muted-foreground">
-                  <span>
-                    No runs yet.{" "}
-                    <Link
-                      to="/dashboard/runs"
-                      search={{ new: "true" }}
-                      className="text-primary hover:underline"
+                {recentRunsQuery.isLoading ? (
+                  <li className="flex items-center justify-center py-12 text-muted-foreground">
+                    <span>Loading…</span>
+                  </li>
+                ) : recentRuns.length === 0 ? (
+                  <li className="flex items-center justify-center py-12 text-muted-foreground">
+                    <span>
+                      {search ? "No matches" : "No runs yet. "}
+                      {!search && (
+                        <>
+                          <Link
+                            to="/dashboard/runs"
+                            search={{ new: "true" }}
+                            className="text-primary hover:underline"
+                          >
+                            Run your first test
+                          </Link>{" "}
+                          to get started.
+                        </>
+                      )}
+                    </span>
+                  </li>
+                ) : (
+                  recentRuns.map((run, index) => (
+                    <motion.li
+                      key={run.id}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: index * 0.03, duration: 0.3 }}
+                      className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-muted/60"
                     >
-                      Run a test suite
-                    </Link>{" "}
-                    to get started.
-                  </span>
-                </li>
+                      <div className="flex items-center gap-4 min-w-0 flex-1">
+                        <span
+                          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase ${statusStyles[run.status]
+                            }`}
+                        >
+                          {run.status}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-foreground">
+                            {run.projectName || "Untitled"}
+                          </p>
+                          <p className="font-mono text-xs text-muted-foreground truncate max-w-xs">
+                            {run.targetUrl}
+                          </p>
+                        </div>
+                      </div>
+                      <Link
+                        to="/dashboard/runs/$runId"
+                        params={{ runId: run.id }}
+                        className="hidden text-xs font-medium text-primary hover:underline sm:block"
+                      >
+                        View details
+                      </Link>
+                    </motion.li>
+                  ))
+                )}
               </ul>
             </Reveal>
 
             <div className="space-y-6">
-              {/* Trend */}
+              {/* Quick actions */}
               <Reveal className="rounded-xl border border-border bg-card p-5">
-                <h2 className="font-mono text-sm font-bold text-foreground">Pass rate trend</h2>
-                <p className="mt-1 text-xs text-muted-foreground">Last 12 runs</p>
-                <div className="mt-5 flex h-32 items-end gap-1.5">
-                  {[42, 55, 48, 63, 59, 71, 68, 80, 76, 88, 84, 96].map((value, index) => (
-                    <motion.div
-                      key={index}
-                      initial={{ height: 0 }}
-                      whileInView={{ height: `${value}%` }}
-                      viewport={{ once: true }}
-                      transition={{ delay: index * 0.04, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-                      className="flex-1 rounded-sm bg-foreground/80 transition-colors hover:bg-foreground"
-                      title={`${value}%`}
-                    />
-                  ))}
+                <h2 className="font-mono text-sm font-bold text-foreground">Quick actions</h2>
+                <div className="mt-4 flex flex-col gap-2">
+                  <Button
+                    asChild
+                    size="sm"
+                    className="font-mono text-xs font-bold"
+                  >
+                    <Link to="/dashboard/runs" search={{ new: "true" }}>
+                      <Play className="h-4 w-4" /> Run new test suite
+                    </Link>
+                  </Button>
+                  <Button
+                    asChild
+                    variant="outline"
+                    size="sm"
+                    className="font-mono text-xs font-bold"
+                  >
+                    <Link to="/dashboard/projects">Create project</Link>
+                  </Button>
                 </div>
               </Reveal>
 
-              {/* Coverage */}
+              {/* Settings reminder */}
               <Reveal className="rounded-xl border border-border bg-card p-5">
-                <h2 className="font-mono text-sm font-bold text-foreground">Coverage by surface</h2>
-                <ul className="mt-5 space-y-4">
-                  {[
-                    { surface: "Routes", value: 92 },
-                    { surface: "Forms", value: 78 },
-                    { surface: "API endpoints", value: 84 },
-                    { surface: "Auth flows", value: 61 },
-                  ].map((item, index) => (
-                    <li key={item.surface}>
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">{item.surface}</span>
-                        <span className="font-mono text-xs text-foreground">{item.value}%</span>
-                      </div>
-                      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                        <motion.div
-                          className="h-full rounded-full bg-foreground"
-                          initial={{ width: 0 }}
-                          whileInView={{ width: `${item.value}%` }}
-                          viewport={{ once: true }}
-                          transition={{
-                            delay: 0.1 + index * 0.08,
-                            duration: 0.7,
-                            ease: [0.22, 1, 0.36, 1],
-                          }}
-                        />
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+                <h2 className="font-mono text-sm font-bold text-foreground">AI Providers</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Configure Ollama, NVIDIA, or OpenRouter in Settings to enable AI-powered test discovery.
+                </p>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="sm"
+                  className="mt-3 font-mono text-[11px] font-bold"
+                >
+                  <Link to="/dashboard/settings">Configure providers →</Link>
+                </Button>
               </Reveal>
             </div>
           </div>

@@ -30,7 +30,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { getProjects } from "@/lib/server-functions";
+import { getDashboardStats, getProjects } from "@/lib/server-functions";
 import { getRuns, createRun } from "@/lib/server-functions";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -128,6 +128,11 @@ function RunsPage() {
     queryFn: getProjects,
   });
 
+  const { data: stats } = useQuery({
+    queryKey: ["dashboardStats"],
+    queryFn: getDashboardStats,
+  });
+
   const {
     data: runs = [],
     isLoading,
@@ -156,7 +161,10 @@ function RunsPage() {
 
   function handleCreateRun(e: React.FormEvent) {
     e.preventDefault();
-    createRunMutation.mutate({ projectId: selectedProjectId, targetUrl } as {
+    createRunMutation.mutate({
+      projectId: selectedProjectId,
+      targetUrl,
+    } as {
       projectId: string;
       targetUrl: string;
     });
@@ -171,6 +179,7 @@ function RunsPage() {
 
   return (
     <div className="flex min-h-screen bg-background">
+      {/* Sidebar */}
       <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-border/60 bg-card px-4 py-6 lg:flex">
         <Link to="/" className="mb-8 flex items-center gap-2 px-2 text-foreground">
           <Terminal className="h-5 w-5" strokeWidth={2.5} />
@@ -199,7 +208,7 @@ function RunsPage() {
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
+                d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2"
               />
             </svg>
             <span>Projects</span>
@@ -226,16 +235,21 @@ function RunsPage() {
         </nav>
 
         <div className="rounded-lg border border-border bg-background p-4">
-          <p className="font-mono text-xs font-bold text-foreground">Free plan</p>
-          <p className="mt-1 text-xs text-muted-foreground">312 / 500 runs used</p>
-          <Progress value={62} className="mt-3 h-1.5" />
+          <p className="font-mono text-xs font-bold text-foreground">Workspace</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {stats ? `${stats.runCount} runs this period` : "No runs yet"}
+          </p>
+          <Progress value={Math.min((stats?.runCount ?? 0) / 100, 1) * 100} className="mt-3 h-1.5" />
           <Button asChild size="sm" className="mt-4 w-full font-mono text-[11px] font-bold">
-            <Link to="/pricing">Upgrade</Link>
+            <Link to="/dashboard/runs" search={{ new: "true" }}>
+              <Play className="h-4 w-4" /> Run tests
+            </Link>
           </Button>
         </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* Topbar */}
         <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border/60 bg-background/80 px-4 backdrop-blur-md sm:px-6">
           <Link to="/" className="flex items-center gap-2 text-foreground lg:hidden">
             <Terminal className="h-5 w-5" strokeWidth={2.5} />
@@ -263,7 +277,7 @@ function RunsPage() {
                 </Link>
                 <Link
                   to="/dashboard/projects"
-                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-foreground bg-muted"
                 >
                   <svg
                     className="h-4 w-4"
@@ -275,7 +289,7 @@ function RunsPage() {
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
-                      d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
+                      d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2"
                     />
                   </svg>
                   <span>Projects</span>
@@ -382,12 +396,8 @@ function RunsPage() {
         <main className="flex-1 px-4 py-8 sm:px-6 lg:px-8">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <h1 className="font-mono text-2xl font-bold tracking-tight text-foreground">
-                Test runs
-              </h1>
-              <p className="mt-1 text-sm text-muted-foreground">
-                View and manage your test executions
-              </p>
+              <h1 className="font-mono text-2xl font-bold tracking-tight text-foreground">Test runs</h1>
+              <p className="mt-1 text-sm text-muted-foreground">View and manage your test executions</p>
             </div>
           </div>
 

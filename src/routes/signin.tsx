@@ -1,7 +1,8 @@
-import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
 import { Eye, EyeOff, Loader2, LogIn } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { useNavigate } from "@tanstack/react-router";
 
 import { AuthLayout, SocialButtons } from "@/components/site/auth-layout";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ export const Route = createFileRoute("/signin")({
 });
 
 function SignInPage() {
+  const navigate = useNavigate();
   const [show, setShow] = useState(false);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [email, setEmail] = useState("");
@@ -60,7 +62,7 @@ function SignInPage() {
         setErrorMsg(error.message || "Sign in failed. Please try again.");
         return;
       }
-      throw redirect({ to: "/dashboard" });
+      await navigate({ to: "/dashboard" }); setState("idle");
     } catch (e) {
       if (e && typeof e === "object" && "status" in e) throw e; // TanStack Router redirect
       setState("error");

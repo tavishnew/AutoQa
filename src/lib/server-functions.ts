@@ -1,8 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { db } from "@/db";
-import { projects, runs, testResults, users } from "@/db/schema";
-import { eq, and, desc, count } from "drizzle-orm";
+import { projects, runs, testResults, users, userSettings, sessions, accounts } from "@/db/schema";
+import { eq, and, desc, count, inArray } from "drizzle-orm";
 import { authClient } from "@/auth/client";
+import { encrypt, decrypt } from "@/lib/server/crypto";
 
 export type Run = {
   id: string;
@@ -187,3 +188,174 @@ export const getDashboardStats = createServerFn({ method: "GET" }).handler(async
     failedRunCount: failedRunCount?.count || 0,
   };
 });
+
+export type UserSettings = {
+  id: string;
+  userId: string;
+  ollamaBaseUrl: string;
+  nvidiaApiKeyMasked: string | null;
+  openRouterApiKeyMasked: string | null;
+  preferredProvider: string;
+  notificationPrefs: {
+    emailRunComplete: boolean;
+    emailRunFailed: boolean;
+    weeklyDigest: boolean;
+  };
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+function maskKey(key: string | null): string | null {
+  if (!key) return null;
+  return "•".repeat(key.length - 4) + key.slice(-4);
+}
+
+function decryptKeyIfProvided(existingEncrypted: string | null, newPlaintext: string | undefined): string | null {
+  if (newPlaintext === undefined) {
+    return existingEncrypted;
+  }
+  if (newPlaintext === "") {
+    return null;
+  }
+  return encrypt(newPlaintext);
+}
+
+function toUserSettings(settings: typeof userSettings.$inferSelect): UserSettings {
+  return {
+    ...settings,
+    ollamaBaseUrl: settings.ollamaBaseUrl ?? "http://localhost:11434",
+    nvidiaApiKeyMasked: maskKey(settings.nvidiaApiKeyEncrypted ? decrypt(settings.nvidiaApiKeyEncrypted) : null),
+    openRouterApiKeyMasked: maskKey(settings.openRouterApiKeyEncrypted ? decrypt(settings.openRouterApiKeyEncrypted) : null),
+    preferredProvider: settings.preferredProvider ?? "ollama",
+    notificationPrefs: (settings.notificationPrefs ?? {}) as UserSettings["notificationPrefs"],
+  };
+}
+
+export const getUserSettings = createServerFn({ method: "GET" }).handler(
+  async (): Promise<UserSettings> => {
+    const { data: session } = await authClient.getSession();
+    if (!session?.user?.id) {
+      throw new Error("Unauthorized");
+    }
+    const [settings] = await db
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.userId, session.user.id))
+      .limit(1);
+    if (!settings) {
+      const [newSettings] = await db
+        .insert(userSettings)
+        .values({ userId: session.user.id })
+        .returning();
+      return toUserSettings(newSettings);
+    }
+    return toUserSettings(settings);
+  },
+);
+
+export const saveUserSettings = createServerFn({ method: "POST" })
+  .validator((data: unknown) => {
+    const {
+      ollamaBaseUrl,
+      nvidiaApiKey,
+      openRouterApiKey,
+      preferredProvider,
+      notificationPrefs,
+    } = data as {
+      ollamaBaseUrl?: string;
+      nvidiaApiKey?: string;
+      openRouterApiKey?: string;
+      preferredProvider?: string;
+      notificationPrefs?: {
+        emailRunComplete?: boolean;
+        emailRunFailed?: boolean;
+        weeklyDigest?: boolean;
+      };
+    };
+    return {
+      ollamaBaseUrl: ollamaBaseUrl?.trim() || "http://localhost:11434",
+      nvidiaApiKey: nvidiaApiKey?.trim(),
+      openRouterApiKey: openRouterApiKey?.trim(),
+      preferredProvider: preferredProvider?.trim() || "ollama",
+      notificationPrefs: notificationPrefs || {
+        emailRunComplete: true,
+        emailRunFailed: true,
+        weeklyDigest: true,
+      },
+    };
+  })
+  .handler(async ({ data }): Promise<UserSettings> => {
+    const { data: session } = await authClient.getSession();
+    if (!session?.user?.id) {
+      throw new Error("Unauthorized");
+    }
+    const [existing] = await db
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.userId, session.user.id))
+      .limit(1);
+    const nvidiaEncrypted = decryptKeyIfProvided(
+      existing?.nvidiaApiKeyEncrypted ?? null,
+      data.nvidiaApiKey,
+    );
+    const openRouterEncrypted = decryptKeyIfProvided(
+      existing?.openRouterApiKeyEncrypted ?? null,
+      data.openRouterApiKey,
+    );
+    const [saved] = await db
+      .insert(userSettings)
+      .values({
+        userId: session.user.id,
+        ollamaBaseUrl: data.ollamaBaseUrl,
+        nvidiaApiKeyEncrypted: nvidiaEncrypted,
+        openRouterApiKeyEncrypted: openRouterEncrypted,
+        preferredProvider: data.preferredProvider,
+        notificationPrefs: data.notificationPrefs,
+      })
+      .onConflictDoUpdate({
+        target: userSettings.userId,
+        set: {
+          ollamaBaseUrl: data.ollamaBaseUrl,
+          nvidiaApiKeyEncrypted: nvidiaEncrypted,
+          openRouterApiKeyEncrypted: openRouterEncrypted,
+          preferredProvider: data.preferredProvider,
+          notificationPrefs: data.notificationPrefs,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return toUserSettings(saved);
+  });
+
+export const deleteAccount = createServerFn({ method: "POST" })
+  .validator((data: unknown) => {
+    const { confirm } = data as { confirm?: boolean };
+    if (!confirm) throw new Error("Deletion must be confirmed");
+    return { confirm: true };
+  })
+  .handler(async (): Promise<{ success: true; redirect: string }> => {
+    const { data: session } = await authClient.getSession();
+    if (!session?.user?.id) {
+      throw new Error("Unauthorized");
+    }
+    const userId = session.user.id;
+    await db.transaction(async (tx) => {
+      const userProjectIds = tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(eq(projects.ownerId, userId));
+      const userRunIds = tx
+        .select({ id: runs.id })
+        .from(runs)
+        .where(inArray(runs.projectId, userProjectIds));
+      await tx.delete(testResults).where(inArray(testResults.runId, userRunIds));
+      await tx.delete(runs).where(inArray(runs.projectId, userProjectIds));
+      await tx.delete(projects).where(eq(projects.ownerId, userId));
+      await tx.delete(userSettings).where(eq(userSettings.userId, userId));
+      await tx.delete(accounts).where(eq(accounts.userId, userId));
+      await tx.delete(sessions).where(eq(sessions.userId, userId));
+      await tx.delete(users).where(eq(users.id, userId));
+    });
+    await authClient.signOut();
+    return { success: true, redirect: "/" };
+  });
